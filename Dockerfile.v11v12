@@ -1,0 +1,70 @@
+# Dockerfile.v11v12 — TTB experiment image for the v11 / v12 hierCov sweep.
+#
+# Extends the encarsia_exp5 base image with:
+#   - the modified Yosys plugin (adds hierfuzz_instrument_v11a/v11b/v12a/v12b),
+#     rebuilt into the bundled Yosys binary at /usr/local/bin/yosys
+#   - the modified encarsia-meta orchestrator (4 new DUT classes,
+#     FUZZER_MAP entries, TCL generators, and the launch script)
+#
+# Build (from repo root so the COPY paths resolve):
+#     docker build -t encarsia-v11v12 -f encarsia/Dockerfile.v11v12 .
+#
+# Run via the wrapper:
+#     ./encarsia/run_v11v12.sh -d /path/to/EnCorpus -H rocket boom -p 40 -N 10
+#
+# Or directly:
+#     docker run --rm -it \
+#         -v $PWD/out/EnCorpus:/encarsia-meta/out/EnCorpus \
+#         -v $PWD/out/ttb_results:/encarsia-meta/out/ttb_results \
+#         encarsia-v11v12 \
+#         ./run_experiments_v11v12.sh -d /encarsia-meta/out/EnCorpus -H rocket boom -p 40 -N 10
+
+FROM ethcomsec/encarsia-artifacts:latest
+
+# -----------------------------------------------------------------------------
+# 1. Overlay the modified Yosys plugin and rebuild.
+# -----------------------------------------------------------------------------
+# `instrument_hierfuzz.cc` now registers four extra Pass classes:
+# hierfuzz_instrument_v11a / _v11b / _v12a / _v12b. Existing v6a/v6b/v9a/v9b/v9c/v9d
+# passes remain bit-identical (the new flags default false everywhere).
+COPY encarsia-yosys/passes/hierfuzz/instrument_hierfuzz.cc \
+     /encarsia-yosys/passes/hierfuzz/instrument_hierfuzz.cc
+
+RUN cd /encarsia-yosys && \
+    make -j"$(nproc)" && \
+    make install && \
+    yosys -p "help hierfuzz_instrument_v11a; help hierfuzz_instrument_v11b; help hierfuzz_instrument_v12a; help hierfuzz_instrument_v12b" > /tmp/yosys_v11v12_check.log 2>&1 && \
+    echo "Yosys v11/v12 passes loadable" && \
+    rm -f /tmp/yosys_v11v12_check.log
+
+# -----------------------------------------------------------------------------
+# 2. Overlay the modified encarsia-meta orchestrator.
+# -----------------------------------------------------------------------------
+# host.py: adds TCL generators for v11a/v11b/v12a/v12b export scripts.
+# multi_run_ttb.py: adds the 4 new fuzzers to FUZZER_MAP + imports.
+# fuzzers/*_dut.py: 4 new DUT classes that route the cocotb harness through
+#   HierRTLhostTotal (via HIER_COV_TOTAL=1 env var, consumed by
+#   hierfuzz/fuzzer.py:_select_rtl_host_cls()).
+# run_experiments_v11v12.sh: launch script wrapping multi_run_ttb.py.
+COPY encarsia-meta/host.py                       /encarsia-meta/host.py
+COPY encarsia-meta/multi_run_ttb.py              /encarsia-meta/multi_run_ttb.py
+COPY encarsia-meta/run_experiments_v11v12.sh     /encarsia-meta/run_experiments_v11v12.sh
+COPY encarsia-meta/fuzzers/hierfuzz_v11a_dut.py  /encarsia-meta/fuzzers/hierfuzz_v11a_dut.py
+COPY encarsia-meta/fuzzers/hierfuzz_v11b_dut.py  /encarsia-meta/fuzzers/hierfuzz_v11b_dut.py
+COPY encarsia-meta/fuzzers/hierfuzz_v12a_dut.py  /encarsia-meta/fuzzers/hierfuzz_v12a_dut.py
+COPY encarsia-meta/fuzzers/hierfuzz_v12b_dut.py  /encarsia-meta/fuzzers/hierfuzz_v12b_dut.py
+
+# The hierfuzz cocotb harness picks up io_hierCovSumTotal via HIER_COV_TOTAL=1,
+# routed in hierfuzz/fuzzer.py. Make sure both files are present in the image —
+# they were already in the original encarsia-artifacts image so we only overlay
+# rtl_host_total.py and the fuzzer.py edit.
+COPY hierfuzz/rtl_host_total.py /encarsia-hierfuzz/hierfuzz/rtl_host_total.py
+COPY hierfuzz/fuzzer.py         /encarsia-hierfuzz/hierfuzz/fuzzer.py
+
+RUN chmod +x /encarsia-meta/run_experiments_v11v12.sh
+
+WORKDIR /encarsia-meta
+
+# Optional default command: print a help banner so `docker run --rm encarsia-v11v12`
+# without args shows what to do.
+CMD ["bash", "-c", "echo 'encarsia-v11v12 ready. Run: ./run_experiments_v11v12.sh -d /encarsia-meta/out/EnCorpus -H rocket boom -p 40 -N 10'; exec bash"]
